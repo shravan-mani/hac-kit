@@ -19,6 +19,7 @@ export interface HacClientOptions extends HttpOptions {
   credentials?: Credentials | (() => Credentials | Promise<Credentials>);
 }
 
+const HOME_PATH = '/HomeAccess/';
 const LOGIN_PATH = '/HomeAccess/Account/LogOn?ReturnUrl=%2fHomeAccess%2f';
 const CLASSWORK_PATH = '/HomeAccess/Content/Student/Assignments.aspx';
 
@@ -54,6 +55,9 @@ export class HacClient {
     if (!result.location || isLoginUrl(result.location)) {
       throw new LoginError(parseLoginError(result.html) ?? 'HAC did not accept the username or password');
     }
+    // Follow that redirect the way a browser does. HAC sets up the student's session on its
+    // landing page, and content pages answer with its error page until that has happened.
+    await this.#http.get(result.location);
     this.#loggedIn = true;
   }
 
@@ -99,12 +103,21 @@ export class HacClient {
     }
   }
 
-  // Requests a page, treating a redirect to the login page as an expired session.
-  async #load(method: 'GET' | 'POST', url: string, form?: Record<string, string>): Promise<Page> {
+  // Requests a page. A redirect to the login page means the session expired. HAC's error
+  // page means the session state was lost while the login cookie still works; reopening
+  // the home page rebuilds it, so that is tried once before giving up.
+  async #load(method: 'GET' | 'POST', url: string, form?: Record<string, string>, reopened = false): Promise<Page> {
     const page = await this.#http.request(method, url, { form, followRedirects: false });
-    if (page.location === undefined) return page;
-    if (isLoginUrl(page.location)) throw new SessionExpiredError('HAC session expired');
-    return this.#http.get(page.location);
+    if (page.location !== undefined) {
+      if (isLoginUrl(page.location)) throw new SessionExpiredError('HAC session expired');
+      return this.#http.get(page.location);
+    }
+    if (!isErrorPage(page.html)) return page;
+    if (reopened) throw new UnexpectedPageError('HAC returned its error page', page.html);
+
+    const home = await this.#http.get(HOME_PATH);
+    if (isLoginUrl(home.url)) throw new SessionExpiredError('HAC session expired');
+    return this.#load(method, url, form, true);
   }
 
   // Submits an ASP.NET WebForms postback, the same way the page's __doPostBack() does.
@@ -122,4 +135,8 @@ export class HacClient {
 
 function isLoginUrl(url: string): boolean {
   return /\/Account\/LogOn/i.test(url);
+}
+
+function isErrorPage(html: string): boolean {
+  return /<title>\s*Error\s*<\/title>/i.test(html);
 }

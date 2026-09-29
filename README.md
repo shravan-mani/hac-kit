@@ -45,7 +45,7 @@ const earlier = await client.getClasswork('1');
 
 | What | Requests |
 | --- | --- |
-| Log in | `GET` + `POST /HomeAccess/Account/LogOn` |
+| Log in | `GET` + `POST /HomeAccess/Account/LogOn`, then open `/HomeAccess/`, where HAC sets up the session |
 | Grades and assignments | `GET /HomeAccess/Content/Student/Assignments.aspx` |
 | Another marking period | `POST` back to the same page, as its Refresh View button does |
 

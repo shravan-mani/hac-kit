@@ -1,21 +1,28 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { HacClient } from '../src/client.ts';
-import { LoginError, SessionExpiredError } from '../src/errors.ts';
+import { LoginError, SessionExpiredError, UnexpectedPageError } from '../src/errors.ts';
 import { fixture, withLoginError } from './helpers.ts';
 
 const BASE_URL = 'https://hac.example.org';
 const credentials = { username: 'student', password: 'correct horse' };
 const loginPage = fixture('login.html');
 const classworkPage = fixture('classwork.html');
+const errorPage = fixture('error.html');
 
 const LOGIN = 'GET /HomeAccess/Account/LogOn';
 const SUBMIT_LOGIN = 'POST /HomeAccess/Account/LogOn';
+const HOME = 'GET /HomeAccess/';
+const WEEK_VIEW = 'GET /HomeAccess/Home/WeekView';
 const CLASSWORK = 'GET /HomeAccess/Content/Student/Assignments.aspx';
 
-/** Just enough of HAC's login and session behaviour to exercise the client. */
-function fakeHac() {
-  const sessions = new Set<string>();
+/**
+ * Just enough of HAC's behaviour to exercise the client: a login cookie, session state
+ * that is only set up once the landing page has been opened, and HAC's error page for
+ * content requested before that.
+ */
+function fakeHac({ classworkAlwaysFails = false } = {}) {
+  const sessions = new Map<string, { ready: boolean }>();
   const requests: string[] = [];
   const posts: URLSearchParams[] = [];
   let issued = 0;
@@ -39,26 +46,49 @@ function fakeHac() {
         form.get('LogOnDetails.Password') === credentials.password;
       if (!accepted) return new Response(withLoginError(loginPage, 'Invalid user name or password.'));
 
-      const session = `s${++issued}`;
-      sessions.add(session);
-      return new Response(null, {
-        status: 302,
-        headers: { location: '/HomeAccess/', 'set-cookie': `.AuthCookie=${session}; path=/; HttpOnly` },
-      });
+      const id = `s${++issued}`;
+      sessions.set(id, { ready: false });
+      return redirect('/HomeAccess/', `.AuthCookie=${id}; path=/; HttpOnly`);
     }
 
-    const session = /\.AuthCookie=(\w+)/.exec(cookies)?.[1];
-    if (!session || !sessions.has(session)) {
-      return new Response(null, { status: 302, headers: { location: '/HomeAccess/Account/LogOn?ReturnUrl=%2fHomeAccess%2f' } });
+    const session = sessions.get(/\.AuthCookie=(\w+)/.exec(cookies)?.[1] ?? '');
+    if (!session) return redirect('/HomeAccess/Account/LogOn?ReturnUrl=%2fHomeAccess%2f');
+
+    switch (url.pathname) {
+      case '/HomeAccess/':
+        return redirect('/HomeAccess/Home/WeekView');
+      case '/HomeAccess/Home/WeekView':
+        session.ready = true;
+        return new Response('<!DOCTYPE html><title>Home View Summary</title>');
+      case '/HomeAccess/Content/Student/Assignments.aspx': {
+        if (!session.ready || classworkAlwaysFails) return new Response(errorPage);
+        const period = form.get('ctl00$plnMain$ddlReportCardRuns');
+        return new Response(period ? selectPeriod(classworkPage, period) : classworkPage);
+      }
+      default:
+        return new Response('Not found', { status: 404 });
     }
-    if (url.pathname === '/HomeAccess/Content/Student/Assignments.aspx') {
-      const period = form.get('ctl00$plnMain$ddlReportCardRuns');
-      return new Response(period ? selectPeriod(classworkPage, period) : classworkPage);
-    }
-    return new Response('Not found', { status: 404 });
   };
 
-  return { fetch, requests, posts, expireSessions: () => sessions.clear() };
+  return {
+    fetch,
+    requests,
+    posts,
+    /** Logs everyone out, as when HAC's login cookie expires. */
+    expireSessions() {
+      sessions.clear();
+    },
+    /** Drops the server-side session state but keeps logins valid. */
+    loseSessionState() {
+      for (const session of sessions.values()) session.ready = false;
+    },
+  };
+}
+
+function redirect(location: string, setCookie?: string): Response {
+  const headers: Record<string, string> = { location };
+  if (setCookie) headers['set-cookie'] = setCookie;
+  return new Response(null, { status: 302, headers });
 }
 
 function selectPeriod(html: string, period: string): string {
@@ -67,25 +97,26 @@ function selectPeriod(html: string, period: string): string {
     .replace(`<option value="${period}">`, `<option selected="selected" value="${period}">`);
 }
 
-test('logs in and loads classwork in three requests', async () => {
+test('logs in, opens the landing page like a browser, then loads classwork', async () => {
   const hac = fakeHac();
   const client = new HacClient(BASE_URL, { credentials, fetch: hac.fetch });
 
   const classwork = await client.getClasswork();
 
   assert.equal(classwork.courses.length, 2);
-  assert.deepEqual(hac.requests, [LOGIN, SUBMIT_LOGIN, CLASSWORK]);
+  assert.deepEqual(hac.requests, [LOGIN, SUBMIT_LOGIN, HOME, WEEK_VIEW, CLASSWORK]);
 });
 
 test('reuses a saved session without logging in', async () => {
   const hac = fakeHac();
   const first = new HacClient(BASE_URL, { credentials, fetch: hac.fetch });
   await first.login();
+  const before = hac.requests.length;
 
   const client = new HacClient(BASE_URL, { cookies: first.cookies, fetch: hac.fetch });
   await client.getClasswork();
 
-  assert.deepEqual(hac.requests.slice(2), [CLASSWORK]);
+  assert.deepEqual(hac.requests.slice(before), [CLASSWORK]);
 });
 
 test('logs in again when the session has expired', async () => {
@@ -93,10 +124,33 @@ test('logs in again when the session has expired', async () => {
   const client = new HacClient(BASE_URL, { credentials, fetch: hac.fetch });
   await client.login();
   hac.expireSessions();
+  const before = hac.requests.length;
 
   await client.getClasswork();
 
-  assert.deepEqual(hac.requests, [LOGIN, SUBMIT_LOGIN, CLASSWORK, LOGIN, SUBMIT_LOGIN, CLASSWORK]);
+  assert.deepEqual(hac.requests.slice(before), [CLASSWORK, LOGIN, SUBMIT_LOGIN, HOME, WEEK_VIEW, CLASSWORK]);
+});
+
+test('rebuilds lost session state without logging in again', async () => {
+  const hac = fakeHac();
+  const first = new HacClient(BASE_URL, { credentials, fetch: hac.fetch });
+  await first.login();
+  hac.loseSessionState();
+  const before = hac.requests.length;
+
+  const client = new HacClient(BASE_URL, { cookies: first.cookies, fetch: hac.fetch });
+  const classwork = await client.getClasswork();
+
+  assert.equal(classwork.courses.length, 2);
+  assert.deepEqual(hac.requests.slice(before), [CLASSWORK, HOME, WEEK_VIEW, CLASSWORK]);
+});
+
+test('gives up with the page when HAC keeps returning its error page', async () => {
+  const hac = fakeHac({ classworkAlwaysFails: true });
+  const client = new HacClient(BASE_URL, { credentials, fetch: hac.fetch });
+
+  await assert.rejects(client.getClasswork(), UnexpectedPageError);
+  assert.deepEqual(hac.requests.slice(-4), [CLASSWORK, HOME, WEEK_VIEW, CLASSWORK]);
 });
 
 test('only asks for credentials when a login is needed', async () => {
