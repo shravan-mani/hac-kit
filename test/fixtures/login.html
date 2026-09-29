@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Login</title>
+</head>
+<body>
+  <form action="/HomeAccess/Account/LogOn?ReturnUrl=%2fHomeAccess%2f" method="post">
+    <input name="__RequestVerificationToken" type="hidden" value="TOKEN" />
+    <input id="Type" name="Type" type="hidden" value="Normal" />
+    <input id="LocalLogin" name="LocalLogin" type="hidden" value="False" />
+    <input id="SiteCode" name="SiteCode" type="hidden" value="" />
+    <input id="SCKTY00328510CustomEnabled" name="SCKTY00328510CustomEnabled" type="hidden" value="False" />
+    <input id="SCKTY00436568CustomEnabled" name="SCKTY00436568CustomEnabled" type="hidden" value="False" />
+    <input id="Database" name="Database" type="hidden" value="10" />
+    <input id="VerificationOption" name="VerificationOption" type="hidden" value="UsernamePassword" />
+    <div class="sg-login-text-left sg-login-validation-summary"></div>
+    <label for="LogOnDetails_UserName">User Name</label>
+    <input id="LogOnDetails_UserName" name="LogOnDetails.UserName" type="text" />
+    <span class="field-validation-valid sg-login-validation" data-valmsg-for="LogOnDetails.UserName"></span>
+    <input id="tempUN" name="tempUN" type="text" style="display:none" />
+    <input id="tempPW" name="tempPW" type="password" style="display:none" />
+    <label for="LogOnDetails_Password">Password</label>
+    <input id="LogOnDetails_Password" name="LogOnDetails.Password" type="password" />
+    <span class="field-validation-valid sg-login-validation" data-valmsg-for="LogOnDetails.Password"></span>
+    <button id="login" name="login" type="submit">Sign In</button>
+  </form>
+</body>
+</html>

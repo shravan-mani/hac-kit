@@ -1,0 +1,22 @@
+{
+  "name": "hac-kit",
+  "version": "0.1.0",
+  "description": "Browserless client for PowerSchool Home Access Center",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.ts\"",
+    "typecheck": "tsc"
+  },
+  "dependencies": {
+    "node-html-parser": "^9.0.4"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.0",
+    "typescript": "^7.0.2"
+  }
+}
