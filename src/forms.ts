@@ -3,13 +3,15 @@ import type { HTMLElement } from 'node-html-parser';
 const SKIPPED_INPUT_TYPES = new Set(['submit', 'button', 'image', 'reset', 'file']);
 
 /**
- * The fields a browser would submit for `form`: named inputs, checked boxes, and the
- * selected option of each select. Pass `submitter` to include the button that was clicked.
+ * The fields a browser would submit from `scope`: named inputs, checked boxes, and the selected
+ * option of each select. `scope` is usually a form, but can be a whole page when the markup is
+ * too broken for the form element to survive parsing. Pass `submitter` to include the button
+ * that was clicked.
  */
-export function formFields(form: HTMLElement, submitter?: HTMLElement | null): Record<string, string> {
+export function formFields(scope: HTMLElement, submitter?: HTMLElement | null): Record<string, string> {
   const fields: Record<string, string> = {};
 
-  for (const element of form.querySelectorAll('input, select, textarea')) {
+  for (const element of scope.querySelectorAll('input, select, textarea')) {
     const name = element.getAttribute('name');
     if (!name) continue;
 

@@ -1,10 +1,18 @@
 import { parse } from 'node-html-parser';
 import { HacError, LoginError, SessionExpiredError, UnexpectedPageError } from './errors.ts';
 import { formFields } from './forms.ts';
+import { currentDate, summarizeGrades } from './grading.ts';
 import { HttpSession, type HttpOptions, type Page } from './http.ts';
-import { MARKING_PERIOD_FIELD, REFRESH_VIEW_TARGET, parseClasswork } from './parsers/classwork.ts';
+import {
+  MARKING_PERIOD_FIELD,
+  PERIOD_CHOICE_BUTTON,
+  PERIOD_CHOICE_FIELD,
+  REFRESH_VIEW_TARGET,
+  parseClasswork,
+  parsePeriodChoices,
+} from './parsers/classwork.ts';
 import { PASSWORD_FIELD, USERNAME_FIELD, parseLoginError, parseLoginForm } from './parsers/login.ts';
-import type { Classwork } from './types.ts';
+import type { Classwork, GradeReport } from './types.ts';
 
 export interface Credentials {
   username: string;
@@ -17,6 +25,11 @@ export interface HacClientOptions extends HttpOptions {
    * only called when a login is actually needed.
    */
   credentials?: Credentials | (() => Credentials | Promise<Credentials>);
+  /**
+   * The district's IANA time zone, e.g. "America/New_York". HAC counts assignments from their
+   * due date on, so this decides what "today" is. Defaults to the local time zone.
+   */
+  timeZone?: string;
 }
 
 const HOME_PATH = '/HomeAccess/';
@@ -25,12 +38,14 @@ const CLASSWORK_PATH = '/HomeAccess/Content/Student/Assignments.aspx';
 
 export class HacClient {
   readonly #http: HttpSession;
+  readonly #timeZone: string | undefined;
   #credentials: HacClientOptions['credentials'];
   #loggedIn: boolean;
 
   constructor(baseUrl: string, options: HacClientOptions = {}) {
     this.#http = new HttpSession(baseUrl, options);
     this.#credentials = options.credentials;
+    this.#timeZone = options.timeZone;
     this.#loggedIn = this.#http.cookies.size > 0;
   }
 
@@ -67,8 +82,8 @@ export class HacClient {
    */
   getClasswork(markingPeriod?: string): Promise<Classwork> {
     return this.#authenticated(async () => {
-      const page = await this.#load('GET', CLASSWORK_PATH);
-      const classwork = parseClasswork(page.html);
+      const page = await this.#openClasswork(await this.#load('GET', CLASSWORK_PATH));
+      const classwork = this.#parseClasswork(page);
       if (!markingPeriod) return classwork;
 
       const period = classwork.markingPeriods.find(({ id, label }) => id === markingPeriod || label === markingPeriod);
@@ -78,9 +93,30 @@ export class HacClient {
       }
       if (period.id === classwork.markingPeriod) return classwork;
 
-      const switched = await this.#postBack(page, REFRESH_VIEW_TARGET, { [MARKING_PERIOD_FIELD]: period.id });
-      return parseClasswork(switched.html);
+      const switched = await this.#showPeriod(page, period.id);
+      const requested = this.#parseClasswork(switched);
+
+      // HAC remembers the marking period for the whole login session and opens on it next time,
+      // while a fresh login opens on the current one. Put it back so that asking for the
+      // current period keeps meaning the current period. If that fails, drop the session
+      // rather than leave one that opens on the wrong period.
+      if (classwork.markingPeriod) {
+        try {
+          await this.#showPeriod(switched, classwork.markingPeriod);
+        } catch {
+          this.#loggedIn = false;
+        }
+      }
+      return requested;
     });
+  }
+
+  /**
+   * Course averages with their formative and summative breakdown, counting work due up to
+   * today. This is the current marking period unless `markingPeriod` says otherwise.
+   */
+  async getGrades(markingPeriod?: string): Promise<GradeReport> {
+    return summarizeGrades(await this.getClasswork(markingPeriod));
   }
 
   async #resolveCredentials(): Promise<Credentials> {
@@ -120,16 +156,31 @@ export class HacClient {
     return this.#load(method, url, form, true);
   }
 
-  // Submits an ASP.NET WebForms postback, the same way the page's __doPostBack() does.
-  #postBack(page: Page, eventTarget: string, overrides: Record<string, string>): Promise<Page> {
-    const form = parse(page.html).querySelector('form');
-    if (!form) throw new UnexpectedPageError('No form to post back', page.html);
-    return this.#load('POST', new URL(form.getAttribute('action') ?? '', page.url).href, {
-      ...formFields(form),
-      __EVENTTARGET: eventTarget,
-      __EVENTARGUMENT: '',
-      ...overrides,
-    });
+  // The Refresh View button: reloads the classwork page for another marking period.
+  async #showPeriod(page: Page, id: string): Promise<Page> {
+    const switched = await this.#postBack(page, { __EVENTTARGET: REFRESH_VIEW_TARGET, [MARKING_PERIOD_FIELD]: id });
+    return this.#openClasswork(switched);
+  }
+
+  // When a report card run covers more than one marking period, HAC asks which to show before
+  // rendering any classwork. Answer with the quarter, which is the one that starts latest.
+  async #openClasswork(page: Page): Promise<Page> {
+    const choices = parsePeriodChoices(page.html);
+    if (choices.length === 0) return page;
+    const quarter = choices.reduce((latest, choice) => ((choice.start ?? '') > (latest.start ?? '') ? choice : latest));
+    return this.#postBack(page, { [PERIOD_CHOICE_FIELD]: quarter.value, [PERIOD_CHOICE_BUTTON]: 'Continue' });
+  }
+
+  #parseClasswork(page: Page): Classwork {
+    return parseClasswork(page.html, currentDate(this.#timeZone));
+  }
+
+  // Submits an ASP.NET WebForms postback the way the page itself would. Fields are collected
+  // from the whole page because some of HAC's pages are malformed enough to lose the form element.
+  #postBack(page: Page, overrides: Record<string, string>): Promise<Page> {
+    const root = parse(page.html);
+    const action = new URL(root.querySelector('form')?.getAttribute('action') ?? '', page.url).href;
+    return this.#load('POST', action, { ...formFields(root), ...overrides });
   }
 }
 

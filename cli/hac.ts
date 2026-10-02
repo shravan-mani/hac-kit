@@ -5,11 +5,13 @@ import {
   HacClient,
   HacError,
   UnexpectedPageError,
+  checkCategoryTotals,
   parseClasswork,
   type Assignment,
   type Classwork,
   type Course,
   type Credentials,
+  type GradeReport,
   type ResponseInfo,
 } from '../src/index.ts';
 
@@ -21,7 +23,7 @@ const USAGE = `Usage: node cli/hac.ts <command> [options]
 
 Commands:
   login                  Log in and save the session
-  grades                 Course averages
+  grades                 Course averages with formative and summative breakdown, as of today
   assignments [course]   Assignments, optionally only for courses whose name contains [course]
   capture                Log in from scratch and save every response to ${CAPTURE_DIR}
 
@@ -76,13 +78,13 @@ async function run(): Promise<void> {
       return;
     }
     case 'grades': {
-      const classwork = await fetchClasswork();
-      if (flags.json) printJson(classwork.courses.map(({ assignments, ...course }) => course));
-      else printGrades(classwork);
+      const report = await withSession((client) => client.getGrades(flags.mp));
+      if (flags.json) printJson(report);
+      else printGrades(report);
       return;
     }
     case 'assignments': {
-      const { courses } = await fetchClasswork();
+      const { courses } = await withSession((client) => client.getClasswork(flags.mp));
       const filter = courseFilter?.toLowerCase();
       const matching = filter ? courses.filter((course) => course.name.toLowerCase().includes(filter)) : courses;
       if (flags.json) printJson(matching);
@@ -96,11 +98,12 @@ async function run(): Promise<void> {
   }
 }
 
-async function fetchClasswork(): Promise<Classwork> {
+// Runs `fetch` with a client that picks up the saved session and saves it again afterwards.
+async function withSession<T>(fetch: (client: HacClient) => Promise<T>): Promise<T> {
   const client = createClient();
-  const classwork = await client.getClasswork(flags.mp);
+  const result = await fetch(client);
   saveSession(client);
-  return classwork;
+  return result;
 }
 
 // Logs in from scratch and saves every response, for checking the parsers against real pages.
@@ -134,7 +137,10 @@ async function capture(): Promise<void> {
 
 function summarize({ markingPeriod, courses }: Classwork): void {
   const assignments = courses.reduce((total, course) => total + course.assignments.length, 0);
-  console.error(`  -> marking period ${markingPeriod}: ${courses.length} courses, ${assignments} assignments`);
+  const mismatches = courses.flatMap(checkCategoryTotals);
+  const check = mismatches.length ? `${mismatches.length} category totals don't match HAC` : 'category totals match HAC';
+  console.error(`  -> marking period ${markingPeriod}: ${courses.length} courses, ${assignments} assignments, ${check}`);
+  for (const mismatch of mismatches) console.error(`     ${mismatch}`);
 }
 
 function createClient(options: { fresh?: boolean; onResponse?: (info: ResponseInfo) => void } = {}): HacClient {
@@ -207,16 +213,18 @@ function saveSession(client: HacClient): void {
   writeFileSync(SESSION_FILE, `${JSON.stringify({ url: baseUrl, cookies: client.cookies }, null, 2)}\n`);
 }
 
-function printGrades({ markingPeriod, markingPeriods, courses }: Classwork): void {
-  const period = markingPeriods.find(({ id }) => id === markingPeriod)?.label ?? markingPeriod;
-  console.log(`Marking period ${period}\n`);
-  printTable(
-    courses.map((course) => [
+function printGrades({ markingPeriod, asOf, courses }: GradeReport): void {
+  console.log(`Marking period ${markingPeriod?.label ?? '?'}, as of ${asOf}\n`);
+  printTable([
+    ['Course', 'Average', 'Formative', 'Summative', ''],
+    ...courses.map((course) => [
       course.name,
-      formatNumber(course.exactAverage ?? course.average),
-      course.lastUpdated ? `updated ${course.lastUpdated}` : '',
+      percentLabel(course.average) || '-',
+      percentLabel(course.formative?.percent ?? null) || '-',
+      percentLabel(course.summative?.percent ?? null) || '-',
+      course.missing ? `${course.missing} missing` : '',
     ]),
-  );
+  ]);
 }
 
 function printAssignments(courses: Course[]): void {
@@ -227,21 +235,31 @@ function printAssignments(courses: Course[]): void {
       continue;
     }
     printTable(
-      course.assignments.map((assignment) => [
-        assignment.dueDate ?? '',
-        assignment.name,
-        scoreLabel(assignment),
-        assignment.percent === null ? '' : `${formatNumber(assignment.percent)}%`,
-        assignment.category,
-      ]),
+      [
+        ['Due', 'Assignment', 'Score', '%', 'Of grade', 'Category'],
+        ...course.assignments.map((assignment) => [
+          assignment.dueDate ?? '',
+          assignment.name,
+          scoreLabel(assignment),
+          percentLabel(assignment.percent),
+          percentLabel(assignment.weightInGrade),
+          assignment.category,
+        ]),
+      ],
       '  ',
     );
   }
 }
 
-function scoreLabel({ score, rawScore, totalPoints }: Assignment): string {
-  const earned = score === null ? rawScore || '-' : formatNumber(score);
-  return totalPoints === null ? earned : `${earned}/${formatNumber(totalPoints)}`;
+function scoreLabel({ graded, missing, score, rawScore, totalPoints }: Assignment): string {
+  if (missing) return `missing, 0/${formatNumber(totalPoints)}`;
+  if (!graded) return rawScore || 'not graded';
+  const earned = formatNumber(score);
+  return totalPoints === null ? `+${earned} extra` : `${earned}/${formatNumber(totalPoints)}`;
+}
+
+function percentLabel(value: number | null): string {
+  return value === null ? '' : `${formatNumber(value)}%`;
 }
 
 function printTable(rows: string[][], indent = ''): void {
